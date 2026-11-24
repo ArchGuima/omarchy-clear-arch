@@ -20,9 +20,43 @@ if (( ${#steps[@]} == 0 )); then
   exit 0
 fi
 
+resolve_xdg_dir() {
+  local env_val="${1:-}"
+  local fallback_rel="$2"
+  if [[ -n "$env_val" && "$env_val" == /* ]]; then
+    printf '%s' "${env_val%/}"
+  elif [[ -n "${HOME:-}" && "$HOME" == /* ]]; then
+    printf '%s' "${HOME%/}/$fallback_rel"
+  fi
+}
+
+clear_user_dir() {
+  local dir="$1"
+  [[ -n "$dir" && "$dir" == /* && "$dir" != "/" ]] || return 0
+  if [[ -L "$dir" ]]; then
+    echo "Skipping symlinked directory: $dir"
+    return 0
+  fi
+  if [[ -d "$dir" ]]; then
+    find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + 2>/dev/null || true
+  fi
+}
+
+mem_available_bytes() {
+  local val
+  val=$(awk '/^MemAvailable:/ { print $2 * 1024; exit }' /proc/meminfo 2>/dev/null || true)
+  if [[ "$val" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$val"
+  else
+    printf '0'
+  fi
+}
+
 needs_sudo=0
 for step in "${steps[@]}"; do
-  [[ "$step" != "user_cache" ]] && needs_sudo=1
+  if [[ "$step" != "user_cache" ]]; then
+    needs_sudo=1
+  fi
 done
 
 if (( needs_sudo == 1 )); then
@@ -75,7 +109,14 @@ for step in "${steps[@]}"; do
       ;;
     user_cache)
       echo "=== [$idx/$total] Clearing thumbnails and Trash ==="
-      rm -rf -- "${XDG_CACHE_HOME:-$HOME/.cache}/thumbnails"/* "${XDG_DATA_HOME:-$HOME/.local/share}/Trash"/* 2>/dev/null || true
+      cache_base=$(resolve_xdg_dir "${XDG_CACHE_HOME:-}" ".cache")
+      data_base=$(resolve_xdg_dir "${XDG_DATA_HOME:-}" ".local/share")
+      if [[ -n "$cache_base" ]]; then
+        clear_user_dir "$cache_base/thumbnails"
+      fi
+      if [[ -n "$data_base" ]]; then
+        clear_user_dir "$data_base/Trash"
+      fi
       echo "Thumbnails and Trash cleared."
       ;;
     dns_cache)
@@ -94,10 +135,20 @@ for step in "${steps[@]}"; do
       echo "=== [$idx/$total] Dropping RAM caches and recycling SWAP ==="
       sync
       echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
-      swaps=$(swapon --show=NAME --noheadings 2>/dev/null || true)
+      swaps=$(swapon --show=USED,NAME --bytes --noheadings --raw 2>/dev/null || true)
       if [[ -n "$swaps" ]]; then
-        while IFS= read -r dev; do
+        while IFS= read -r entry; do
+          [[ -z "$entry" ]] && continue
+          used_bytes="${entry%% *}"
+          dev="${entry#* }"
           [[ -z "$dev" ]] && continue
+          if [[ "$used_bytes" =~ ^[0-9]+$ ]] && (( used_bytes > 0 )); then
+            avail_bytes=$(mem_available_bytes)
+            if (( used_bytes + 134217728 >= avail_bytes )); then
+              echo "Skipping $dev (insufficient available RAM to safely unload swap)."
+              continue
+            fi
+          fi
           case "$dev" in
             /dev/zram*)
               unit="dev-$(basename -- "$dev").swap"

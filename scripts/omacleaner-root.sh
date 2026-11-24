@@ -3,8 +3,30 @@
 # Accepts only validated step identifiers as arguments.
 set -uo pipefail
 
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+umask 022
+
 emit_log() {
   printf '@@LOG:%s\n' "$*"
+}
+
+pipe_log() {
+  local l
+  while IFS= read -r l || [[ -n "$l" ]]; do
+    if [[ -n "$l" ]]; then
+      emit_log "$l"
+    fi
+  done
+}
+
+mem_available_bytes() {
+  local val
+  val=$(awk '/^MemAvailable:/ { print $2 * 1024; exit }' /proc/meminfo 2>/dev/null || true)
+  if [[ "$val" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$val"
+  else
+    printf '0'
+  fi
 }
 
 emit_step() {
@@ -44,7 +66,7 @@ for step in "$@"; do
       mapfile -t orfaos < <(pacman -Qtdq 2>/dev/null || true)
       if (( ${#orfaos[@]} > 0 )); then
         emit_log "[orphans] Removing ${#orfaos[@]} package(s): ${orfaos[*]}"
-        if pacman -Rns --noconfirm -- "${orfaos[@]}" 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+        if pacman -Rns --noconfirm -- "${orfaos[@]}" 2>&1 | pipe_log; then
           emit_step orphans DONE
         else
           emit_step orphans ERROR "pacman -Rns failed"
@@ -60,7 +82,7 @@ for step in "$@"; do
       emit_step pacman_cache START
       if command -v paccache >/dev/null 2>&1; then
         emit_log "[pacman_cache] Running paccache -rk2 and -ruk0..."
-        if { paccache -rk2 && paccache -ruk0; } 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+        if { paccache -rk2 && paccache -ruk0; } 2>&1 | pipe_log; then
           emit_step pacman_cache DONE
         else
           emit_step pacman_cache ERROR "paccache failed"
@@ -68,7 +90,7 @@ for step in "$@"; do
         fi
       else
         emit_log "[pacman_cache] paccache not found; using pacman -Sc..."
-        if pacman -Sc --noconfirm 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+        if pacman -Sc --noconfirm 2>&1 | pipe_log; then
           emit_step pacman_cache DONE
         else
           emit_step pacman_cache ERROR "pacman -Sc failed"
@@ -93,7 +115,7 @@ for step in "$@"; do
     journal)
       emit_step journal START
       emit_log "[journal] Vacuuming systemd journal (100M / 7d)..."
-      if { journalctl --vacuum-size=100M && journalctl --vacuum-time=7d; } 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+      if { journalctl --vacuum-size=100M && journalctl --vacuum-time=7d; } 2>&1 | pipe_log; then
         emit_step journal DONE
       else
         emit_step journal ERROR "journalctl vacuum failed"
@@ -105,7 +127,7 @@ for step in "$@"; do
       emit_step dns_cache START
       if systemctl is-active --quiet systemd-resolved; then
         emit_log "[dns_cache] Flushing systemd-resolved cache..."
-        if resolvectl flush-caches 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+        if resolvectl flush-caches 2>&1 | pipe_log; then
           emit_step dns_cache DONE
         else
           emit_step dns_cache ERROR "resolvectl failed"
@@ -113,7 +135,7 @@ for step in "$@"; do
         fi
       elif systemctl is-active --quiet dnsmasq; then
         emit_log "[dns_cache] Restarting dnsmasq..."
-        if systemctl restart dnsmasq 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+        if systemctl restart dnsmasq 2>&1 | pipe_log; then
           emit_step dns_cache DONE
         else
           emit_step dns_cache ERROR "dnsmasq restart failed"
@@ -121,7 +143,7 @@ for step in "$@"; do
         fi
       elif command -v nscd >/dev/null 2>&1 && systemctl is-active --quiet nscd; then
         emit_log "[dns_cache] Invalidating nscd hosts cache..."
-        if nscd -i hosts 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+        if nscd -i hosts 2>&1 | pipe_log; then
           emit_step dns_cache DONE
         else
           emit_step dns_cache ERROR "nscd failed"
@@ -143,24 +165,34 @@ for step in "$@"; do
         step_ok=0
       fi
 
-      swaps=$(swapon --show=NAME --noheadings 2>/dev/null || true)
+      swaps=$(swapon --show=USED,NAME --bytes --noheadings --raw 2>/dev/null || true)
       if [[ -n "$swaps" ]]; then
         emit_log "[ram_swap] Recycling active SWAP devices..."
-        while IFS= read -r dev; do
+        while IFS= read -r entry; do
+          [[ -z "$entry" ]] && continue
+          used_bytes="${entry%% *}"
+          dev="${entry#* }"
           [[ -z "$dev" ]] && continue
+          if [[ "$used_bytes" =~ ^[0-9]+$ ]] && (( used_bytes > 0 )); then
+            avail_bytes=$(mem_available_bytes)
+            if (( used_bytes + 134217728 >= avail_bytes )); then
+              emit_log "[ram_swap] Skipping $dev (insufficient available RAM to safely unload swap)."
+              continue
+            fi
+          fi
           case "$dev" in
             /dev/zram*)
               unit="dev-$(basename -- "$dev").swap"
               if systemctl cat "$unit" >/dev/null 2>&1; then
                 emit_log "[ram_swap] Restarting $unit..."
-                systemctl restart "$unit" 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done || step_ok=0
+                systemctl restart "$unit" 2>&1 | pipe_log || step_ok=0
               else
                 emit_log "[ram_swap] Skipping $dev (unmanaged zram)."
               fi
               ;;
             *)
               emit_log "[ram_swap] Cycling $dev..."
-              if ! { swapoff -- "$dev" && swapon -- "$dev"; } 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done; then
+              if ! { swapoff -- "$dev" && swapon -- "$dev"; } 2>&1 | pipe_log; then
                 step_ok=0
               fi
               ;;

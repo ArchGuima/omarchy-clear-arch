@@ -11,7 +11,10 @@ Panel {
   moduleName: "archguima.omacleaner"
   ipcTarget: "archguima.omacleaner"
 
-  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/+$/, "")
+  readonly property string pluginDir: {
+    var raw = String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/+$/, "")
+    try { return decodeURIComponent(raw) } catch (e) { return raw }
+  }
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgentColor: bar ? bar.urgent : Commons.Color.urgent
   readonly property color accentColor: Commons.Color.accent
@@ -84,7 +87,7 @@ Panel {
   )
 
   function refreshScan() {
-    if (scanProc.running) return
+    if (cleaning || scanProc.running) return
     scanProc.command = ["/usr/bin/bash", root.pluginDir + "/scripts/scan.sh"]
     scanProc.running = true
   }
@@ -163,8 +166,10 @@ Panel {
   }
 
   function launchInTerminal() {
+    if (cleaning) return
     var ids = Model.selectedStepIds(stepSelection)
-    var scriptCmd = "'" + root.pluginDir.replace(/'/g, "'\\''") + "/scripts/omacleaner-terminal.sh'"
+    if (ids.length === 0) return
+    var scriptCmd = "/usr/bin/bash '" + root.pluginDir.replace(/'/g, "'\\''") + "/scripts/omacleaner-terminal.sh'"
     for (var i = 0; i < ids.length; i++) {
       scriptCmd += " " + ids[i]
     }
@@ -283,7 +288,19 @@ Panel {
       onRead: function(line) { root.handleRunnerLine(line) }
     }
     onExited: function(exitCode) {
-      if (root.authCancelledFlag || exitCode === 126 || exitCode === 127) {
+      var cancelled = root.authCancelledFlag || exitCode === 126 || exitCode === 127
+      var finalizedStatuses = Object.assign({}, root.stepStatuses)
+      var statusesChanged = false
+      for (var i = 0; i < root.stepsModel.length; i++) {
+        var sid = root.stepsModel[i].id
+        if (finalizedStatuses[sid] === "running") {
+          finalizedStatuses[sid] = cancelled ? "idle" : "error"
+          statusesChanged = true
+        }
+      }
+      if (statusesChanged) root.stepStatuses = finalizedStatuses
+
+      if (cancelled) {
         root.cleanStatus = "cancelled"
         root.progressPercent = 0
       } else if (exitCode !== 0) {
