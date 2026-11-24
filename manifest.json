@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "archguima.omacleaner",
+  "name": "OmaCleaner",
+  "version": "1.0.0",
+  "author": "ArchGuima",
+  "description": "Deep Arch Linux system cleanup panel for the Omarchy bar",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaCleaner",
+    "description": "Deep Arch Linux system cleanup",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
