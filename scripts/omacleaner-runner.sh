@@ -79,8 +79,14 @@ bump_progress() {
 aur_pkg_failed=0
 if (( ${#root_steps[@]} > 0 )); then
   emit_log "Requesting administrator authorization..."
+  root_helper_started=0
   pkexec_rc=0
-  while IFS= read -r line; do
+  exec {pkexec_fd}< <(pkexec /usr/bin/bash "$ROOT_HELPER" "${root_steps[@]}" 2>&1)
+  pkexec_pid=$!
+  while IFS= read -r line <&"$pkexec_fd" || [[ -n "$line" ]]; do
+    if [[ "$line" == @@STEP:*:START ]]; then
+      root_helper_started=1
+    fi
     if [[ "$line" == @@STEP:aur_cache:ERROR:* ]]; then
       aur_pkg_failed=1
       continue
@@ -91,12 +97,17 @@ if (( ${#root_steps[@]} > 0 )); then
         bump_progress
         ;;
     esac
-  done < <(pkexec /usr/bin/bash "$ROOT_HELPER" "${root_steps[@]}" 2>&1) || pkexec_rc=$?
+  done
+  exec {pkexec_fd}<&-
+  wait "$pkexec_pid" || pkexec_rc=$?
 
   if (( pkexec_rc == 126 || pkexec_rc == 127 )); then
     printf '@@AUTH_CANCELLED\n'
     emit_log "Administrator authentication was cancelled."
     exit 126
+  elif (( pkexec_rc != 0 && root_helper_started == 0 )); then
+    emit_log "Administrator authorization failed before privileged cleanup started (exit $pkexec_rc)."
+    exit "$pkexec_rc"
   elif (( pkexec_rc != 0 )); then
     overall_rc=1
   fi
@@ -107,10 +118,10 @@ if (( run_aur_user == 1 )); then
   aur_ok=1
   if command -v yay >/dev/null 2>&1; then
     emit_log "[aur_cache] Cleaning yay AUR cache..."
-    yay -Sc --aur --noconfirm 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done || aur_ok=0
+    yay -Sc --aur --noconfirm 2>&1 | while IFS= read -r l; do if [[ -n "$l" ]]; then emit_log "$l"; fi; done || aur_ok=0
   elif command -v paru >/dev/null 2>&1; then
     emit_log "[aur_cache] Cleaning paru AUR cache..."
-    paru -Sc --aur --noconfirm 2>&1 | while IFS= read -r l; do [[ -n "$l" ]] && emit_log "$l"; done || aur_ok=0
+    paru -Sc --aur --noconfirm 2>&1 | while IFS= read -r l; do if [[ -n "$l" ]]; then emit_log "$l"; fi; done || aur_ok=0
   else
     emit_log "[aur_cache] No supported AUR helper (yay/paru) installed."
   fi
