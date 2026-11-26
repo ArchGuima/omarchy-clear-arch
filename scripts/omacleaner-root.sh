@@ -180,23 +180,17 @@ for step in "$@"; do
               continue
             fi
           fi
-          case "$dev" in
-            /dev/zram*)
-              unit="dev-$(basename -- "$dev").swap"
-              if systemctl cat "$unit" >/dev/null 2>&1; then
-                emit_log "[ram_swap] Restarting $unit..."
-                systemctl restart "$unit" 2>&1 | pipe_log || step_ok=0
-              else
-                emit_log "[ram_swap] Skipping $dev (unmanaged zram)."
-              fi
-              ;;
-            *)
-              emit_log "[ram_swap] Cycling $dev..."
-              if ! { swapoff -- "$dev" && swapon -- "$dev"; } 2>&1 | pipe_log; then
-                step_ok=0
-              fi
-              ;;
-          esac
+          prio=$(swapon --show=PRIO --noheadings --raw "$dev" 2>/dev/null || true)
+          emit_log "[ram_swap] Cycling $dev..."
+          if [[ "$prio" =~ ^-?[0-9]+$ ]]; then
+            if ! { swapoff -- "$dev" && swapon -p "$prio" -- "$dev"; } 2>&1 | pipe_log; then
+              step_ok=0
+            fi
+          else
+            if ! { swapoff -- "$dev" && swapon -- "$dev"; } 2>&1 | pipe_log; then
+              step_ok=0
+            fi
+          fi
         done <<< "$swaps"
         emit_log "[ram_swap] SWAP recycle finished."
       else

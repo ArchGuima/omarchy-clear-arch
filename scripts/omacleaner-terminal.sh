@@ -149,19 +149,12 @@ for step in "${steps[@]}"; do
               continue
             fi
           fi
-          case "$dev" in
-            /dev/zram*)
-              unit="dev-$(basename -- "$dev").swap"
-              if systemctl cat "$unit" >/dev/null 2>&1; then
-                sudo systemctl restart "$unit"
-              else
-                echo "Skipping $dev (unmanaged zram)."
-              fi
-              ;;
-            *)
-              sudo swapoff -- "$dev" && sudo swapon -- "$dev"
-              ;;
-          esac
+          prio=$(swapon --show=PRIO --noheadings --raw "$dev" 2>/dev/null || true)
+          if [[ "$prio" =~ ^-?[0-9]+$ ]]; then
+            sudo swapoff -- "$dev" && sudo swapon -p "$prio" -- "$dev"
+          else
+            sudo swapoff -- "$dev" && sudo swapon -- "$dev"
+          fi
         done <<< "$swaps"
         echo "SWAP recycled successfully."
       else
